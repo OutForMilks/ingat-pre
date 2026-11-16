@@ -1,78 +1,41 @@
 from pathlib import Path
+import csv
 import os
-import sys
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from supabase import create_client
+
+from search import prepare_drugs, search_drugs
 
 ROOT_DIR = Path(__file__).parents[3]
-load_dotenv(ROOT_DIR / ".env")
+DRUG_CSV = Path(__file__).parent / "data" / "ph_GenBrn.csv"
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "8000"))
 
-ALGO_DIR = Path(__file__).parent / "algos"
-sys.path.insert(0, str(ALGO_DIR))
 
-from search import lev_search, prepare_candidates, search_drugs
+def load_drug_names() -> list[str]:
+    with DRUG_CSV.open(newline="", encoding="utf-8-sig") as csv_file:
+        return [row["Drug Names"] for row in csv.DictReader(csv_file)]
 
-def load_transcription_rows() -> list[dict[str, str]]:
-    supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY") or os.environ.get("SUPABASE_KEY")
-    if not supabase_url or not supabase_key:
-        raise RuntimeError(
-            "Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY "
-            "(or SUPABASE_KEY) in the .env file."
-        )
 
-    client = create_client(supabase_url, supabase_key)
-    rows: list[dict[str, str]] = []
-    page_size = 1000
-    offset = 0
+prepared_drugs = prepare_drugs(load_drug_names())
+if not prepared_drugs:
+    raise RuntimeError(f"{DRUG_CSV.name} has no usable drug names.")
+print(f"Loaded {len(prepared_drugs)} drug transcriptions from {DRUG_CSV.name}.")
 
-    while True:
-        response = (
-            client.table("drug-db")
-            .select("id,name,eng_ipa,fil_ipa,source")
-            .range(offset, offset + page_size - 1)
-            .execute()
-        )
-        page = response.data
-        rows.extend(page)
-        if len(page) < page_size:
-            break
-        offset += page_size
-
-    return rows
-
-transcription_rows = load_transcription_rows()
-prepared_candidates = prepare_candidates(transcription_rows)
-if not prepared_candidates:
-    raise RuntimeError(
-        "Supabase returned no valid drug rows. "
-        "Check that drug-db has non-empty name and eng_ipa columns."
-    )
-print(
-    f"Loaded {len(prepared_candidates)} drug transcriptions "
-    "from Supabase."
-)
 app = FastAPI()
+# The page is served from this server, so it needs no CORS. This only lets a
+# page hosted on GitHub Pages call the API directly.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5500",
-        "http://localhost:5500",
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        "https://chua-e.github.io",
-        "http://127.0.0.1:8000",
-        "http://localhost:8000",
-    ],
+    allow_origins=["https://chua-e.github.io"],
     allow_methods=["POST"],
     allow_headers=["Content-Type"],
 )
+
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
@@ -85,9 +48,10 @@ def search(request: SearchRequest):
         raise HTTPException(status_code=422, detail="Enter a drug name.")
 
     try:
-        return search_drugs(query, prepared_candidates)
+        return search_drugs(query, prepared_drugs)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
 
 # Serve the frontend from the same server so one command runs everything.
 @app.get("/", include_in_schema=False)
@@ -101,5 +65,5 @@ app.mount("/src", StaticFiles(directory=ROOT_DIR / "src"), name="src")
 if __name__ == "__main__":
     import uvicorn
 
-    print("IngatRX running at http://127.0.0.1:8000")
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    print(f"IngatRX running at http://{HOST}:{PORT}")
+    uvicorn.run(app, host=HOST, port=PORT)

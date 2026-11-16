@@ -1,274 +1,231 @@
-import functools
-import heapq
-import importlib
+"""Ranks drugs with the CatBoost LASA classifier.
+
+Each query is paired with every drug. `phoc` scores each pair twice, on the full
+names and on their core words, and the classifier combines those scores into
+the probability that the two names are look-alike/sound-alike.
+"""
+
+import csv
+import os
+import subprocess
 import sys
-from dataclasses import dataclass, field
+import tempfile
+import tomllib
+import types
+from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "algos"))
+import joblib
+import numpy as np
 
-from bisim import get_bigrams
-from english_g2p import clean_for_aline, english_to_ipa
-from tagalog_g2p import TagalogG2P
+from filipino_ipa import nativize, transcribe_all
+from names import clean_name, core_name
 
-# NLTK's align() spends most of its time recomputing feature distances for the
-# same phoneme pairs. They only depend on the segments, so memoize them.
-# align() looks these up as module globals, so patching the module is enough.
-# Inputs must be str (not list) so the 2-segment slices passed to sigma_exp are
-# hashable.
-_aline = importlib.import_module("nltk.metrics.aline")
-for _name in ("sigma_skip", "sigma_sub", "sigma_exp", "delta"):
-    _fn = getattr(_aline, _name)
-    if not hasattr(_fn, "cache_info"):
-        setattr(_aline, _name, functools.lru_cache(maxsize=None)(_fn))
-align = _aline.align
-
-# Only the best-looking candidates by cheap bigram scores go through ALINE.
-# Taken separately on spelling and on IPA so sound-alikes spelled differently
-# still get a chance. Set to None to run ALINE on every row.
-PREFILTER_SIZE: int | None = 500
+PY_DIR = Path(__file__).parent
+ROOT_DIR = Path(__file__).parents[3]
+PHOC_PATH = (
+    ROOT_DIR / "vendor/pho/target/release" / ("phoc.exe" if os.name == "nt" else "phoc")
+)
+# phoc names each score column after its config file, as in walter's bin/pho_conf.
+CONFIG_DIR = PY_DIR / "classifier_configs"
+ALINE_COLUMN = "aline_kondrak"
+MODEL_PATH = PY_DIR / "models/c9_catboost.joblib"
+CACHE_PATH = PY_DIR / "data/classifier_cache.csv"
 RESULT_LIMIT = 20
 
+if not PHOC_PATH.exists():
+    raise RuntimeError(
+        f"phoc not found at {PHOC_PATH}. Build it from the repo root with: "
+        "cargo build --release --bin phoc --manifest-path vendor/pho/Cargo.toml"
+    )
 
-@dataclass
-class WordData:
-    original: str
-    english_ipa: str
-    # tagalog_ipa: str
-    name_bigrams: frozenset[str] = field(init=False, repr=False, compare=False)
-    ipa_bigrams: frozenset[str] = field(init=False, repr=False, compare=False)
-    normalized: str = field(init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        self.name_bigrams = frozenset(get_bigrams(self.original))
-        self.ipa_bigrams = frozenset(get_bigrams(self.english_ipa))
-        self.normalized = normalize_name(self.original)
+with (CONFIG_DIR / f"{ALINE_COLUMN}.toml").open("rb") as config_file:
+    # phoc fails the whole batch on a symbol missing from the config's inventory.
+    # It ignores digits but rejects an empty transcription, so walter keeps them.
+    _ALLOWED_SYMBOLS = set("".join(tomllib.load(config_file)["sounds"])) | set(
+        "ː .0123456789"
+    )
 
 
-def dice(bigrams1: frozenset[str], bigrams2: frozenset[str]) -> float:
-    """Same result as bisim.dice_coefficient, on precomputed bigram sets."""
-    if not bigrams1 and not bigrams2:
-        return 1.0
-    if not bigrams1 or not bigrams2:
-        return 0.0
-    return 2.0 * len(bigrams1 & bigrams2) / (len(bigrams1) + len(bigrams2))
-
-
-@dataclass
-class PairSimilarity:
-    word1: WordData
-    word2: WordData
-    english_sim: float
-    # filipino_sim: float
-    english_bigram: float
-    weighted_avg: float
-
-
-def compute_ipa_similarity(phones1: str, phones2: str) -> float:
-    # The memoized ALINE functions need hashable (str) input.
-    if not isinstance(phones1, str):
-        phones1 = "".join(phones1)
-    if not isinstance(phones2, str):
-        phones2 = "".join(phones2)
-    if not phones1 or not phones2:
-        return 0.0
-    if phones1 == phones2:
-        return 1.0
-
+def _load_model():
+    """Return the fitted CatBoost model from inside bowl's wrapper object."""
+    # The .joblib references bowl's wrapper class, which isn't installed here.
+    # Only the CatBoostClassifier it holds is needed.
+    stand_ins = {
+        name: types.ModuleType(name)
+        for name in ("src", "src.models", "src.models.catboost")
+    }
+    stand_ins["src.models.catboost"].CatBoost = type("CatBoost", (), {})
+    sys.modules.update(stand_ins)
     try:
-        alignments = align(phones1, phones2)
-    except ValueError:
-        return 0.0
-    if not alignments or not alignments[0]:
-        return 0.0
-
-    total_delta = 0.0
-    valid_pairs = 0
-    for pair in alignments[0]:
-        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-            phone1, phone2 = str(pair[0]), str(pair[1])
-            if phone1 == "-" or phone2 == "-":
-                total_delta += 115
-            else:
-                try:
-                    total_delta += _aline.delta(phone1, phone2)
-                except (KeyError, TypeError):
-                    total_delta += 115
-            valid_pairs += 1
-
-    if not valid_pairs:
-        return 0.0
-    score = 1.0 - total_delta / (valid_pairs * 115)
-    return max(0.0, min(1.0, score))
+        return joblib.load(MODEL_PATH)._model
+    finally:
+        for name in stand_ins:
+            del sys.modules[name]
 
 
-def compute_pairwise_similarities(
-    query: WordData, candidates: list[WordData]
-) -> list[PairSimilarity]:
-    pairs = []
-    for candidate in candidates:
-        english_bigram = dice(query.name_bigrams, candidate.name_bigrams)
-        english_sim = compute_ipa_similarity(query.english_ipa, candidate.english_ipa)
-        # filipino_sim = compute_ipa_similarity(
-        #     list(query.tagalog_ipa), list(candidate.tagalog_ipa)
-        # )
-        weighted_avg = (english_bigram + english_sim) / 2
-        pairs.append(
-            PairSimilarity(
-                word1=query,
-                word2=candidate,
-                english_sim=english_sim,
-                # filipino_sim=filipino_sim,
-                english_bigram=english_bigram,
-                weighted_avg=weighted_avg,
-            )
-        )
-    return pairs
+_model = _load_model()
 
 
-def prepare_candidates(
-    rows: list[dict[str, str]],
-) -> list[tuple[dict[str, str], WordData]]:
-    prepared = []
-    for row in rows:
-        name = row.get("name", "").strip()
-        english_ipa = row.get("eng_ipa", "").strip()
-        # tagalog_ipa = row.get("fil_ipa", "").strip()
-        if name and english_ipa:
-            prepared.append(
-                (
-                    row,
-                    WordData(
-                        original=name,
-                        english_ipa=clean_for_aline(english_ipa),
-                        # tagalog_ipa=tagalog_ipa,
-                    ),
-                )
-            )
-    return prepared
+def _phoc_column(feature: str) -> tuple[bool, str]:
+    """Map a model feature to (scored on core words?, phoc column name)."""
+    is_core = feature.startswith("core_")
+    name = feature.removeprefix("core_")
+    return is_core, ALINE_COLUMN if name.startswith("aline_var:") else name
 
 
-def shortlist_candidates(
-    query: WordData,
-    prepared_candidates: list[tuple[dict[str, str], WordData]],
-    size: int | None,
-) -> list[tuple[dict[str, str], WordData]]:
-    """Top `size` rows by spelling bigrams plus top `size` by IPA bigrams.
-
-    Keeps the original row order so ties rank the same as a full scan.
-    """
-    if size is None or len(prepared_candidates) <= 2 * size:
-        return prepared_candidates
-    indices = range(len(prepared_candidates))
-    by_name = heapq.nlargest(
-        size,
-        indices,
-        key=lambda i: dice(query.name_bigrams, prepared_candidates[i][1].name_bigrams),
-    )
-    by_ipa = heapq.nlargest(
-        size,
-        indices,
-        key=lambda i: dice(query.ipa_bigrams, prepared_candidates[i][1].ipa_bigrams),
-    )
-    return [prepared_candidates[i] for i in sorted(set(by_name) | set(by_ipa))]
+FEATURES: list[str] = list(_model.feature_names_)
+_FEATURE_COLUMNS = [_phoc_column(feature) for feature in FEATURES]
 
 
-def search_drugs(
-    query: str,
-    prepared_candidates: list[tuple[dict[str, str], WordData]],
-) -> list[dict[str, object]]:
-    """Rank candidates using the existing combined phonetic and spelling score."""
-    query = query.strip()
-    if not query:
-        raise ValueError("Query must not be empty.")
+def _feature_group(feature: str) -> str:
+    """Sort a feature into pho's look-alike and sound-alike algorithm families."""
+    name = feature.removeprefix("core_")
+    if "_separate_" in name:
+        return "edit_counts"  # Counts, so not on the 0-1 scale of the similarities.
+    if name.startswith("aline_var:") or name in ("bisim", "editex"):
+        return "sound_alike"
+    return "look_alike"
 
-    normalized_query = normalize_name(query)
-    exact_candidate = next(
-        (
-            candidate
-            for _, candidate in prepared_candidates
-            if candidate.normalized == normalized_query
-        ),
-        None,
-    )
-    query_data = exact_candidate or WordData(
-        original=query,
-        english_ipa=clean_for_aline(english_to_ipa(query.lower())),
-    )
-    shortlist = shortlist_candidates(query_data, prepared_candidates, PREFILTER_SIZE)
-    pairs = compute_pairwise_similarities(
-        query_data,
-        [candidate for _, candidate in shortlist],
-    )
-    ranked = sorted(
-        zip(pairs, shortlist),
-        key=lambda item: item[0].weighted_avg,
-        reverse=True,
-    )[:RESULT_LIMIT]
 
+_GROUP_COLUMNS = {
+    group: [
+        column
+        for column, feature in enumerate(FEATURES)
+        if _feature_group(feature) == group
+    ]
+    for group in ("look_alike", "sound_alike", "edit_counts")
+}
+
+
+@dataclass
+class Drug:
+    name: str
+    clean: str
+    core: str
+    nativized: str
+    ipa: str
+    core_ipa: str
+
+
+def _to_phoc_ipa(ipa: str) -> str:
+    return "".join(symbol for symbol in ipa if symbol in _ALLOWED_SYMBOLS)
+
+
+def _prepare_all(names: list[str]) -> list[Drug]:
+    cleans = [clean_name(name) for name in names]
+    cores = [core_name(clean) for clean in cleans]
+    nativized = [nativize(clean) for clean in cleans]
+    ipas = transcribe_all(nativized)
+    core_ipas = transcribe_all([nativize(core) for core in cores])
     return [
-        {
-            "name": drug["name"],
-            "type": drug.get("type", ""),
-            "source": drug.get("source", "Philippine FDA"),
-            "score": round(float(pair.weighted_avg) * 100, 2),
-            "components": {
-                "english": round(float(pair.english_sim) * 100, 2),
-                # "filipino": round(float(pair.filipino_sim) * 100, 2),
-                "english_bigram": round(float(pair.english_bigram) * 100, 2),
-            },
-        }
-        for pair, (drug, _) in ranked
+        Drug(name, clean, core, spelling, _to_phoc_ipa(ipa), _to_phoc_ipa(core_ipa))
+        for name, clean, core, spelling, ipa, core_ipa in zip(
+            names, cleans, cores, nativized, ipas, core_ipas
+        )
     ]
 
 
-def normalize_name(name: str) -> str:
-    return "".join(character for character in name.casefold() if character.isalnum())
+def prepare_drugs(names: list[str]) -> list[Drug]:
+    """Transcribe the drug list, reusing the cache when it covers the same names."""
+    if CACHE_PATH.exists():
+        with CACHE_PATH.open(newline="", encoding="utf-8") as cache_file:
+            cached = [Drug(**row) for row in csv.DictReader(cache_file)]
+        if [drug.name for drug in cached] == names:
+            return cached
+
+    drugs = _prepare_all(names)
+    with CACHE_PATH.open("w", newline="", encoding="utf-8") as cache_file:
+        writer = csv.DictWriter(cache_file, fieldnames=list(Drug.__dataclass_fields__))
+        writer.writeheader()
+        writer.writerows(vars(drug) for drug in drugs)
+    return drugs
 
 
-def levenshtein_distance(first: str, second: str) -> int:
-    if len(first) < len(second):
-        first, second = second, first
+def _run_phoc(
+    query: tuple[str, str], candidates: list[tuple[str, str]]
+) -> dict[str, np.ndarray]:
+    """Score (name, ipa) against each candidate and return every phoc column."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = Path(temp_dir, "input.csv")
+        output_path = Path(temp_dir, "output.csv")
 
-    previous = list(range(len(second) + 1))
-    for row, first_char in enumerate(first, start=1):
-        current = [row]
-        for column, second_char in enumerate(second, start=1):
-            current.append(
-                min(
-                    current[column - 1] + 1,
-                    previous[column] + 1,
-                    previous[column - 1] + (first_char != second_char),
-                )
-            )
-        previous = current
-    return previous[-1]
+        with input_path.open("w", newline="", encoding="utf-8") as input_file:
+            writer = csv.writer(input_file)
+            writer.writerow(["x_1", "x_2", "t_1", "t_2"])
+            for name, ipa in candidates:
+                writer.writerow([query[0], name, query[1], ipa])
 
-
-def lev_search(
-    query: str,
-    prepared_candidates: list[tuple[dict[str, str], WordData]],
-) -> list[dict[str, object]]:
-    normalized_query = normalize_name(query.strip())
-    if not normalized_query:
-        raise ValueError("Query must contain at least one letter or number.")
-
-    ranked = []
-    for drug, candidate in prepared_candidates:
-        distance = levenshtein_distance(
-            normalized_query, normalize_name(candidate.original)
+        completed = subprocess.run(
+            [
+                PHOC_PATH,
+                "csv",
+                "--input",
+                input_path,
+                "--output",
+                output_path,
+                "--config-dir",
+                CONFIG_DIR,
+            ],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
         )
-        max_len = max(len(normalized_query), len(normalize_name(candidate.original)))
-        score = 1.0 - (distance / max_len)
-        ranked.append((score, candidate.original.casefold(), drug))
-    ranked.sort(key=lambda item: (-item[0], item[1]))
+        if completed.returncode != 0:
+            raise RuntimeError(f"phoc failed: {completed.stderr.strip()}")
+
+        with output_path.open(newline="", encoding="utf-8") as output_file:
+            rows = list(csv.DictReader(output_file))
+
+    columns = {column for _, column in _FEATURE_COLUMNS}
+    return {
+        column: np.array([float(row[column]) for row in rows]) for column in columns
+    }
+
+
+def search_drugs(query: str, drugs: list[Drug]) -> list[dict[str, object]]:
+    """Rank drugs by the classifier's look-alike/sound-alike probability."""
+    target = _prepare_all([query])[0]
+    if not target.clean:
+        raise ValueError("Query must contain at least one letter or number.")
+    if not target.ipa:
+        raise ValueError("Query must contain at least one letter.")
+
+    full = _run_phoc(
+        (target.clean, target.ipa), [(drug.clean, drug.ipa) for drug in drugs]
+    )
+    core = _run_phoc(
+        (target.core, target.core_ipa), [(drug.core, drug.core_ipa) for drug in drugs]
+    )
+
+    inputs = np.column_stack(
+        [(core if is_core else full)[column] for is_core, column in _FEATURE_COLUMNS]
+    )
+    probabilities = _model.predict_proba(inputs)[:, 1]
+    look_alike = inputs[:, _GROUP_COLUMNS["look_alike"]].mean(axis=1) * 100
+    sound_alike = inputs[:, _GROUP_COLUMNS["sound_alike"]].mean(axis=1) * 100
+
+    # Include each measure's top drugs so the page can re-arrange without searching.
+    selected = {
+        int(index)
+        for measure in (probabilities, look_alike, sound_alike)
+        for index in np.argsort(-measure, kind="stable")[:RESULT_LIMIT]
+    }
+
+    def group_scores(index: int, group: str) -> dict[str, float]:
+        return {FEATURES[c]: float(inputs[index, c]) for c in _GROUP_COLUMNS[group]}
 
     return [
         {
-            "name": drug["name"],
-            "type": drug.get("type", ""),
-            "source": drug.get("source", "Philippine FDA"),
-            "score": round(score * 100, 2),
+            "name": drugs[index].name,
+            "nativized": drugs[index].nativized,
+            "score": round(float(probabilities[index]) * 100, 2),
+            "look_alike": float(look_alike[index]),
+            "sound_alike": float(sound_alike[index]),
+            "source": "ph_GenBrn",
+            "look_alike_scores": group_scores(index, "look_alike"),
+            "sound_alike_scores": group_scores(index, "sound_alike"),
+            "edit_counts": group_scores(index, "edit_counts"),
         }
-        for score, _, drug in ranked[:20]
+        for index in sorted(selected, key=lambda i: (-probabilities[i], i))
     ]
