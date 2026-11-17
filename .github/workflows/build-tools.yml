@@ -1,0 +1,45 @@
+# Builds phoc and tbb-cli for the home server (Linux x86_64) and publishes them
+# as the "linux-tools" release, so the server can download two small binaries
+# instead of installing Rust. Run it by hand from the Actions tab.
+name: Build Linux tools
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # An older glibc than the server's, so the binaries run there.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build phoc
+        run: cargo build --release --bin phoc --manifest-path vendor/pho/Cargo.toml
+
+      - name: Build tbb-cli
+        run: >
+          cargo install --git https://github.com/Mango-Cats/tagabaybay
+          --rev cf4673c7e2c00930e6361f054f8a6be16506399f
+          --bin tbb-cli --root tbb --locked
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp vendor/pho/target/release/phoc tbb/bin/tbb-cli dist/
+          strip dist/*
+          tar -czf linux-tools.tar.gz -C dist .
+          ls -la dist linux-tools.tar.gz
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view linux-tools >/dev/null 2>&1 ||
+            gh release create linux-tools --title "Linux tools" \
+              --notes "phoc and tbb-cli built for the home server."
+          gh release upload linux-tools linux-tools.tar.gz --clobber
