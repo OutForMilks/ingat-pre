@@ -19,8 +19,24 @@ const arrangeOptions = getElement("#arrange");
 const showNativized = getElement("#show-nativized");
 const showBreakdown = getElement("#show-breakdown");
 let currentResults = [];
+// On GitHub Pages the API is on the home server, behind a quick tunnel whose URL
+// changes on every restart, so read the current one from tunnel.json. The
+// timestamp gets past Pages' cache. Served from the server, the API is local.
+async function apiBase() {
+    if (!location.hostname.endsWith("github.io")) {
+        return "";
+    }
+    try {
+        const response = await fetch(`tunnel.json?t=${Date.now()}`);
+        const { url } = (await response.json());
+        return url.replace(/\/$/, "");
+    }
+    catch {
+        throw new Error("Couldn't find the search server. Try again in a minute.");
+    }
+}
 async function runSearch(query) {
-    const response = await fetch("api/search", {
+    const response = await fetch(`${await apiBase()}/api/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),

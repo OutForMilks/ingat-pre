@@ -45,13 +45,13 @@ Then open http://127.0.0.1:8000. Set `HOST` and `PORT` to listen somewhere else.
 
 ### Hosting with Cloudflare Tunnel
 
-Point the tunnel at the server, and the tunnel URL serves both the page and the API:
+The page is on GitHub Pages (https://outformilks.github.io/ingat-pre/) and the API runs on the home server behind a Cloudflare quick tunnel:
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
-`go.html` is the GitHub Pages entry point and embeds the tunnel URL. A quick tunnel gets a new URL each time it starts, so the home server commits the new one to `go.html` and `tunnel.json`.
+A quick tunnel gets a new URL each time it starts, so the home server commits the current one to `tunnel.json`. On GitHub Pages, the page reads `tunnel.json` before each search and sends the search to that URL. The tunnel URL itself also serves the whole site.
 
 ### Frontend
 

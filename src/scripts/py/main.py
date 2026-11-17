@@ -27,11 +27,11 @@ if not prepared_drugs:
 print(f"Loaded {len(prepared_drugs)} drug transcriptions from {DRUG_CSV.name}.")
 
 app = FastAPI()
-# The page is served from this server, so it needs no CORS. This only lets a
-# page hosted on GitHub Pages call the API directly.
+# Lets the page on GitHub Pages call the API. The copy served from this server
+# is on the same origin, so it needs no CORS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://chua-e.github.io"],
+    allow_origins=["https://outformilks.github.io"],
     allow_methods=["POST"],
     allow_headers=["Content-Type"],
 )
