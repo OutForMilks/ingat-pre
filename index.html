@@ -30,20 +30,16 @@
                     <span id="loading-spinner" class="spinner" aria-hidden="true" hidden></span>
                 </button>
             </div>
-                <div class="results">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Drug names</th>
-                                <th id="nativized-head" hidden>Nativized name</th>
-                                <th>Look-alike similarity</th>
-                                <th>Sound-alike similarity</th>
-                                <th>LASA probability</th>
-                                <th>Source/s</th>
-                            </tr>
-                        </thead>
-                        <tbody id="rows"></tbody>
-                    </table>
+            <div class="results">
+                <div class="result-head" aria-hidden="true">
+                    <span>Drug names</span>
+                    <span>Look-alike similarity</span>
+                    <span>Sound-alike similarity</span>
+                    <span>LASA probability</span>
+                    <span>Source/s</span>
+                    <span></span>
+                </div>
+                <div id="rows" role="list" aria-label="Similar drug names"></div>
                 <div class="empty" id="empty" role="status" aria-live="polite">Enter a proposed name and click "Search" to compare it against existing drugs.</div>
             </div>
         </section>
@@ -72,12 +68,55 @@
                 <label><input type="radio" name="arrange" value="look"> Look-alike similarity</label>
                 <label><input type="radio" name="arrange" value="sound"> Sound-alike similarity</label>
             </fieldset>
-            <fieldset>
-                <legend>Show in results</legend>
-                <label><input type="checkbox" id="show-breakdown"> Score breakdown</label>
-                <label><input type="checkbox" id="show-nativized"> Nativized name</label>
-            </fieldset>
         </aside>
     </main>
+
+    <dialog id="details" aria-labelledby="details-title">
+        <div class="details-top">
+            <h2 id="details-title"></h2>
+            <button type="button" id="details-close" class="details-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="details-body">
+            <div class="verdict" id="details-verdict"></div>
+
+            <div>
+                <div class="section-head">
+                    <h3>How they're read in Filipino</h3>
+                    <p>Used for the sound-alike checks</p>
+                </div>
+                <div class="spelled" id="details-spelled"></div>
+            </div>
+
+            <div class="compare-bar">
+                <span id="compare-label">Scores below compare the</span>
+                <div class="seg" id="details-parts" role="group" aria-labelledby="compare-label">
+                    <button type="button" data-part="full" aria-pressed="true">Whole name</button>
+                    <button type="button" data-part="core" aria-pressed="false">Core word</button>
+                </div>
+            </div>
+
+            <div>
+                <div class="section-head">
+                    <h3>How alike they look</h3>
+                </div>
+                <ul class="measures" id="details-look"></ul>
+            </div>
+
+            <div class="divided">
+                <div class="section-head">
+                    <h3>How alike they sound</h3>
+                </div>
+                <ul class="measures" id="details-sound"></ul>
+            </div>
+
+            <div class="divided" id="details-edits-section">
+                <div class="section-head">
+                    <h3>Spelling difference</h3>
+                    <p>Whole name only</p>
+                </div>
+                <ul class="measures" id="details-edits"></ul>
+            </div>
+        </div>
+    </dialog>
     <script type="module" src="./src/scripts/js/main.js"></script>
 </body>

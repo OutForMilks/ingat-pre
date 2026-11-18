@@ -11,6 +11,10 @@
   --control:#363636;
 
   --danger:#c62828;
+  --danger-soft:#fde8e6;
+  --caution:#8a5a00;
+  --caution-soft:#fff1c2;
+  --backdrop:rgba(20,20,20,.55);
 
   --font: "Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
 
@@ -26,6 +30,9 @@
     --text:#eaeaea; 
     --muted:#a8a8a8;
     --danger:#ff8a80;
+    --danger-soft:#4a2523;
+    --caution:#f2c94c;
+    --caution-soft:#45391a;
     --control:#b8bb26;
     color-scheme:dark;
   }
@@ -190,88 +197,337 @@ button:focus-visible {
     border-radius: 6px;
 }
 
-table { 
-    width: 100%; 
-    border-collapse: collapse; 
-    table-layout: fixed;
+/* Results list: one grid row per drug, with the header using the same columns. */
+.result-head,
+.result-row {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 6.5em;
+    align-items: center;
+    gap: 1.2em;
+    padding: 0.9em 1.2em;
 }
 
-th {
+.result-head {
     position: sticky;
     top: 0;
     z-index: 1;
     background: var(--panel);
     color: var(--muted);
-    text-align: left;
     font-weight: 600;
-    font-size: 0.8em;
-    padding: 1em;
     border-bottom: 1px solid var(--border);
 }
 
-td {
-    padding: 12px 16px;
+/* Shrink the labels, not the header row, so its em-based gaps and padding match the rows. */
+.result-head > span {
+    font-size: 0.8em;
+}
+
+.result-row + .result-row {
+    border-top: 1px solid var(--border);
+}
+
+.result-row.alt {
+    background: var(--row-alt);
+}
+
+.result-row:hover {
+    background: rgba(184,187,38,.14);
+}
+
+.drug-name {
+    font-weight: 600;
     overflow-wrap: anywhere;
 }
 
-tbody tr.alt td {
-    background:var(--row-alt);
-}
-
-tr.detail td {
-    padding-top: 0;
-}
-
-.warning {
-    display: inline-block;
-    margin-left: 0.7em;
-    color: var(--danger);
-    font-size: 0.85em;
-    font-weight: 700;
-    white-space: nowrap;
-}
-
-.breakdown h3 {
-    margin: 0.3em 0;
+.drug-name small {
+    display: block;
+    margin-top: 0.2em;
     color: var(--muted);
-    font-size: 0.85em;
+    opacity: 0.75;
+    font-size: 0.75em;
+    font-weight: 400;
 }
 
-.inputs {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(15em, 1fr));
-    gap: 0.15em 1.5em;
-    margin: 0;
-}
-
-.inputs > div {
-    display: flex;
-    justify-content: space-between;
-    gap: 1em;
-    font-size: 0.85em;
-}
-
-.inputs dt {
-    color: var(--muted);
-}
-
-.inputs dd {
-    margin: 0;
+.similarity {
     font-variant-numeric: tabular-nums;
 }
 
-.breakdown p {
-    margin: 0.4em 0 0;
-    color: var(--muted);
-    font-size: 0.85em;
+.cell-label {
+    display: none;
 }
 
-tbody tr:hover td {
-    background:rgba(184,187,38,.14);
+.source {
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+    .result-head {
+        display: none;
+    }
+
+    .result-row {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 0.8em 1.2em;
+    }
+
+    .result-row .drug-name {
+        grid-column: 1 / -1;
+    }
+
+    .result-row .details-button {
+        grid-column: 1 / -1;
+        justify-self: stretch;
+    }
+
+    .cell-label {
+        display: block;
+        color: var(--muted);
+        font-size: 0.8em;
+    }
 }
 
 .empty {
     color: #6666668a;
     padding: 4em;
     text-align: center;
+}
+
+/* LASA probability: red at or above the likely threshold, yellow at or above the possible one. */
+.lasa {
+    display: inline-block;
+    padding: 0.2em 0.6em;
+    border-radius: 99px;
+    font-variant-numeric: tabular-nums;
+}
+
+.lasa.high {
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-weight: 700;
+}
+
+.lasa.possible {
+    background: var(--caution-soft);
+    color: var(--caution);
+    font-weight: 700;
+}
+
+.details-button {
+    justify-self: end;
+    white-space: nowrap;
+    background: none;
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 0.4em 0.9em;
+    font-weight: 600;
+}
+
+.details-button:hover {
+    background: rgba(184,187,38,.14);
+    border-color: var(--accent);
+}
+
+dialog {
+    width: min(40em, calc(100vw - 2em));
+    max-height: calc(100vh - 3em);
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--text);
+    overflow: auto;
+}
+
+dialog::backdrop {
+    background: var(--backdrop);
+}
+
+.details-top {
+    position: sticky;
+    top: 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 1em;
+    padding: 1.2em 1.4em 1em;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+}
+
+.details-top h2 {
+    margin: 0;
+    font-size: 1.25em;
+    overflow-wrap: anywhere;
+}
+
+.details-close {
+    margin-left: auto;
+    flex: none;
+    width: 2em;
+    height: 2em;
+    padding: 0;
+    background: none;
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-size: 1.2em;
+    line-height: 1;
+}
+
+.details-close:hover {
+    background: var(--row-alt);
+}
+
+.details-body {
+    display: grid;
+    gap: 1.5em;
+    padding: 1.2em 1.4em 1.6em;
+}
+
+.verdict {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.8em;
+    padding: 0.9em;
+    border-radius: 8px;
+    background: var(--row-alt);
+}
+
+.verdict p {
+    margin: 0;
+    line-height: 1.5;
+}
+
+.section-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5em;
+    margin-bottom: 0.6em;
+}
+
+.section-head h3 {
+    margin: 0;
+    font-size: 0.95em;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.section-head p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9em;
+}
+
+.spelled {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12em, 1fr));
+    gap: 0.6em;
+}
+
+.spelled > div {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6em 0.8em;
+}
+
+.spelled span {
+    display: block;
+    color: var(--muted);
+    font-size: 0.85em;
+}
+
+.spelled b {
+    font-size: 1.1em;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+/* The whole name / core word switch in a shaded box. The negative margin pushes the box
+   outward by its own padding, so its text still lines up with the section headings. */
+.compare-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6em 1em;
+    margin-inline: -0.9em;
+    padding: 0.6em 0.6em 0.6em 0.9em;
+    border-radius: 8px;
+    background: var(--row-alt);
+}
+
+.compare-bar > span {
+    color: var(--muted);
+}
+
+.seg {
+    display: inline-flex;
+    background: var(--panel);
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.seg button {
+    background: none;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 0.4em 0.9em;
+    border-radius: 6px;
+}
+
+.seg button:hover {
+    background: var(--row-alt);
+}
+
+.seg button[aria-pressed="true"] {
+    background: rgba(184,187,38,.2);
+    color: var(--text);
+    font-weight: 700;
+}
+
+.measures {
+    display: grid;
+    gap: 1.1em;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.measures li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.25em 1em;
+    align-items: center;
+}
+
+.measures .what {
+    font-weight: 400;
+}
+
+.measures .tech {
+    margin-top: 0.3em;
+    color: var(--muted);
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 0.75em;
+}
+
+.measures .value {
+    white-space: nowrap;
+    font-size: 0.9em;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+/* Thin line above the sound-alike and spelling sections. */
+.divided {
+    padding-top: 1.5em;
+    border-top: 1px solid var(--border);
+}
+
+.divided[hidden] {
+    display: none;
 }

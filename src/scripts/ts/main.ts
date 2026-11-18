@@ -2,6 +2,10 @@
 interface SearchResult {
     name: string;
     nativized: string;
+    /** "Generic", "Brand" or "Generic and brand"; missing when unknown. */
+    name_type?: string | null;
+    /** The query's own Filipino spelling. Missing from older backends. */
+    query_nativized?: string;
     /** CatBoost LASA probability, in percent. */
     score: number;
     look_alike: number;
@@ -9,11 +13,29 @@ interface SearchResult {
     source: string;
     look_alike_scores: Record<string, number>;
     sound_alike_scores: Record<string, number>;
+    edit_counts?: Record<string, number>;
 }
 
 const RESULT_LIMIT = 20;
-// CatBoost's default decision boundary.
+// CatBoost's default decision boundary. Scores at or above it are shown in red.
 const LIKELY_LASA_PERCENT = 50;
+// Scores at or above this, but under LIKELY_LASA_PERCENT, are shown in yellow.
+const POSSIBLE_LASA_PERCENT = 20;
+
+// Plain-English names for the algorithms behind each score, keyed by phoc column.
+const MEASURE_LABELS: Record<string, string> = {
+    levenshtein: "Same letters in the same order",
+    levenshtein_consonant: "Same consonants in the same order",
+    prefix: "Starts the same way",
+    lcsuf: "Ends the same way",
+    lcsubstring: "Longest run of shared letters",
+    visual_weighted: "Letters that look alike, like m and n",
+    aline: "Sounds alike when said in Filipino",
+    editex: "Letters that sound alike, like c and k",
+    bisim: "Shared pairs of letters",
+};
+
+type NamePart = "full" | "core";
 
 function getElement<T extends HTMLElement>(selector: string): T {
     const element = document.querySelector<T>(selector);
@@ -27,14 +49,25 @@ const input = getElement<HTMLInputElement>("#q");
 const button = getElement<HTMLButtonElement>("#go");
 const buttonLabel = getElement<HTMLSpanElement>("#go-label");
 const spinner = getElement<HTMLSpanElement>("#loading-spinner");
-const rows = getElement<HTMLTableSectionElement>("#rows");
+const rows = getElement<HTMLDivElement>("#rows");
 const empty = getElement<HTMLDivElement>("#empty");
-const nativizedHead = getElement<HTMLTableCellElement>("#nativized-head");
 const arrangeOptions = getElement<HTMLFieldSetElement>("#arrange");
-const showNativized = getElement<HTMLInputElement>("#show-nativized");
-const showBreakdown = getElement<HTMLInputElement>("#show-breakdown");
+
+const details = getElement<HTMLDialogElement>("#details");
+const detailsTitle = getElement<HTMLHeadingElement>("#details-title");
+const detailsClose = getElement<HTMLButtonElement>("#details-close");
+const detailsVerdict = getElement<HTMLDivElement>("#details-verdict");
+const detailsSpelled = getElement<HTMLDivElement>("#details-spelled");
+const detailsParts = getElement<HTMLDivElement>("#details-parts");
+const detailsLook = getElement<HTMLUListElement>("#details-look");
+const detailsSound = getElement<HTMLUListElement>("#details-sound");
+const detailsEdits = getElement<HTMLUListElement>("#details-edits");
+const detailsEditsSection = getElement<HTMLDivElement>("#details-edits-section");
 
 let currentResults: SearchResult[] = [];
+let currentQuery = "";
+let openResult: SearchResult | null = null;
+let openPart: NamePart = "full";
 
 // On GitHub Pages the API is on the home server, behind a quick tunnel whose URL
 // changes on every restart, so read the current one from tunnel.json. The
@@ -65,59 +98,148 @@ async function runSearch(query: string): Promise<SearchResult[]> {
     return (await response.json()) as SearchResult[];
 }
 
-function inputLabel(feature: string): string {
-    const name = feature
-        .replace(/^core_/, "")
-        .replace(/^aline_var:.*$/, "aline (Filipino)")
-        .replaceAll("_", " ");
-    return feature.startsWith("core_") ? `${name}, core word` : name;
-}
-
-function inputGroup(title: string, scores: Record<string, number>): DocumentFragment {
-    const heading = document.createElement("h3");
-    heading.textContent = title;
-
-    const list = document.createElement("dl");
-    list.className = "inputs";
-    for (const [feature, value] of Object.entries(scores)) {
-        const item = document.createElement("div");
-        const name = document.createElement("dt");
-        name.textContent = inputLabel(feature);
-        const score = document.createElement("dd");
-        score.textContent = Number.isInteger(value) ? String(value) : value.toFixed(3);
-        item.append(name, score);
-        list.append(item);
+function element<K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    className?: string,
+    text?: string,
+): HTMLElementTagNameMap[K] {
+    const created = document.createElement(tag);
+    if (className) {
+        created.className = className;
     }
-
-    const group = document.createDocumentFragment();
-    group.append(heading, list);
-    return group;
+    if (text !== undefined) {
+        created.textContent = text;
+    }
+    return created;
 }
 
-function breakdownElement(result: SearchResult): HTMLDivElement {
-    const container = document.createElement("div");
-    container.className = "breakdown";
-    container.append(
-        inputGroup("Look-alike", result.look_alike_scores),
-        inputGroup("Sound-alike", result.sound_alike_scores),
+function riskLevel(score: number): "high" | "possible" | "low" {
+    if (score >= LIKELY_LASA_PERCENT) {
+        return "high";
+    }
+    return score >= POSSIBLE_LASA_PERCENT ? "possible" : "low";
+}
+
+function scoreBadge(score: number): HTMLSpanElement {
+    const level = riskLevel(score);
+    const badge = element("span", `lasa ${level}`, `${score}%`);
+    if (level === "high") {
+        badge.title = `Likely LASA: ${LIKELY_LASA_PERCENT}% or higher`;
+    } else if (level === "possible") {
+        badge.title = `Possible LASA: ${POSSIBLE_LASA_PERCENT}% to ${LIKELY_LASA_PERCENT}%`;
+    }
+    return badge;
+}
+
+function alike(percent: number): string {
+    if (percent >= 80) {
+        return "very alike";
+    }
+    if (percent >= 60) {
+        return "quite alike";
+    }
+    if (percent >= 40) {
+        return "a little alike";
+    }
+    return "not alike";
+}
+
+function measureKey(feature: string): string {
+    return feature.replace(/^core_/, "").replace(/^aline_var:.*$/, "aline");
+}
+
+function scoresFor(scores: Record<string, number>, part: NamePart): [string, number][] {
+    return Object.entries(scores).filter(
+        ([feature]) => feature.startsWith("core_") === (part === "core"),
     );
-    return container;
 }
 
-function scoreContent(result: SearchResult): string | DocumentFragment {
-    const score = `${result.score}%`;
-    if (result.score < LIKELY_LASA_PERCENT) {
-        return score;
+function measureRow(what: string, tech: string, value: string): HTMLLIElement {
+    const item = element("li");
+    const label = element("div");
+    label.append(element("div", "what", what), element("div", "tech", tech));
+    item.append(label, element("div", "value", value));
+    return item;
+}
+
+function fillMeasures(list: HTMLUListElement, scores: [string, number][]): void {
+    list.replaceChildren(
+        ...scores.map(([feature, value]) => {
+            const key = measureKey(feature);
+            return measureRow(
+                MEASURE_LABELS[key] ?? key.replaceAll("_", " "),
+                feature.replace(/^core_/, ""),
+                `${(value * 100).toFixed(0)}%`,
+            );
+        }),
+    );
+}
+
+function fillDetailScores(): void {
+    if (!openResult) {
+        return;
     }
+    // The browser lib has no DOM.Iterable, so NodeList uses forEach, not for...of.
+    detailsParts.querySelectorAll<HTMLButtonElement>("button").forEach((option) => {
+        option.setAttribute("aria-pressed", String(option.dataset.part === openPart));
+    });
+    fillMeasures(detailsLook, scoresFor(openResult.look_alike_scores, openPart));
+    fillMeasures(detailsSound, scoresFor(openResult.sound_alike_scores, openPart));
+}
 
-    const warning = document.createElement("span");
-    warning.className = "warning";
-    warning.title = `The classifier's probability is ${LIKELY_LASA_PERCENT}% or higher`;
-    warning.textContent = "⚠ Likely LASA";
+// Levenshtein edit counts (levenshtein_separate.toml): letters swapped, and letters added or removed.
+const EDIT_MEASURES: [string, string][] = [
+    ["levenshtein_separate_substitutions", "Letters to change"],
+    ["levenshtein_separate_indels", "Letters to add or remove"],
+];
 
-    const content = document.createDocumentFragment();
-    content.append(score, warning);
-    return content;
+function fillEdits(counts: Record<string, number> | undefined): void {
+    const items = EDIT_MEASURES.filter(([feature]) => counts?.[feature] !== undefined).map(
+        ([feature, what]) => {
+            const count = Math.round(counts![feature]);
+            return measureRow(what, feature, `${count} letter${count === 1 ? "" : "s"}`);
+        },
+    );
+    detailsEdits.replaceChildren(...items);
+    detailsEditsSection.hidden = items.length === 0;
+}
+
+function spelling(label: string, text: string): HTMLDivElement {
+    const box = element("div");
+    box.append(element("span", undefined, label), element("b", undefined, text));
+    return box;
+}
+
+function openDetails(result: SearchResult): void {
+    openResult = result;
+    openPart = "full";
+
+    detailsTitle.textContent = `${currentQuery} vs ${result.name}`;
+
+    const level = riskLevel(result.score);
+    const heading = {
+        high: "Likely to be mixed up.",
+        possible: "Could be mixed up.",
+        low: "Unlikely to be mixed up.",
+    }[level];
+    const sentence = element("p");
+    sentence.append(
+        element("b", undefined, heading),
+        ` The model gives a ${result.score}% chance that these names get confused. ` +
+            `They look ${alike(result.look_alike)} (${result.look_alike.toFixed(0)}%) ` +
+            `and sound ${alike(result.sound_alike)} (${result.sound_alike.toFixed(0)}%).`,
+    );
+    detailsVerdict.replaceChildren(scoreBadge(result.score), sentence);
+
+    detailsSpelled.replaceChildren(
+        ...(result.query_nativized ? [spelling(currentQuery, result.query_nativized)] : []),
+        spelling(result.name, result.nativized),
+    );
+
+    fillEdits(result.edit_counts);
+
+    fillDetailScores();
+    details.showModal();
 }
 
 function arrangedResults(): SearchResult[] {
@@ -136,47 +258,46 @@ function arrangedResults(): SearchResult[] {
         .slice(0, RESULT_LIMIT);
 }
 
+function similarity(label: string, percent: number): HTMLDivElement {
+    const cell = element("div", "similarity");
+    cell.append(element("span", "cell-label", label), `${percent.toFixed(1)}%`);
+    return cell;
+}
+
 function renderResults(): void {
-    const includeNativized = showNativized.checked;
-    nativizedHead.hidden = !includeNativized;
-
     rows.replaceChildren(
-        ...arrangedResults().flatMap((result, position) => {
-            const row = document.createElement("tr");
-            const values = [
-                result.name,
-                ...(includeNativized ? [result.nativized] : []),
-                `${result.look_alike.toFixed(1)}%`,
-                `${result.sound_alike.toFixed(1)}%`,
-                scoreContent(result),
-                result.source,
-            ];
+        ...arrangedResults().map((result, position) => {
+            const row = element("div", position % 2 === 1 ? "result-row alt" : "result-row");
+            row.setAttribute("role", "listitem");
 
-            for (const value of values) {
-                const cell = document.createElement("td");
-                cell.append(value);
-                row.append(cell);
+            const name = element("div", "drug-name", result.name);
+            if (result.name_type) {
+                name.append(element("small", undefined, result.name_type));
             }
 
-            const rendered = [row];
-            if (showBreakdown.checked) {
-                const detail = document.createElement("tr");
-                detail.className = "detail";
-                const cell = document.createElement("td");
-                cell.colSpan = values.length;
-                cell.append(breakdownElement(result));
-                detail.append(cell);
-                rendered.push(detail);
-            }
+            const lasa = element("div");
+            lasa.append(element("span", "cell-label", "LASA probability"), scoreBadge(result.score));
 
-            if (position % 2 === 1) {
-                rendered.forEach((element) => element.classList.add("alt"));
-            }
-            return rendered;
+            const source = element("div", "source");
+            source.append(element("span", "cell-label", "Source/s"), result.source);
+
+            const open = element("button", "details-button", "Details");
+            open.type = "button";
+            open.setAttribute("aria-label", `Details for ${result.name}`);
+            open.addEventListener("click", () => openDetails(result));
+
+            row.append(
+                name,
+                similarity("Look-alike similarity", result.look_alike),
+                similarity("Sound-alike similarity", result.sound_alike),
+                lasa,
+                source,
+                open,
+            );
+            return row;
         }),
     );
 }
-
 function showResults(results: SearchResult[]): void {
     currentResults = results;
     renderResults();
@@ -201,6 +322,7 @@ async function search(): Promise<void> {
 
     try {
         const results = await runSearch(query);
+        currentQuery = query;
         showResults(results);
 
         empty.textContent = results.length ? "" : "No matching drugs found.";
@@ -217,11 +339,24 @@ async function search(): Promise<void> {
 }
 
 arrangeOptions.addEventListener("change", renderResults);
-showNativized.addEventListener("change", renderResults);
-showBreakdown.addEventListener("change", renderResults);
 button.addEventListener("click", search);
 input.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Enter") {
         void search();
+    }
+});
+
+detailsParts.addEventListener("click", (event: MouseEvent) => {
+    const option = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-part]");
+    if (option) {
+        openPart = option.dataset.part as NamePart;
+        fillDetailScores();
+    }
+});
+detailsClose.addEventListener("click", () => details.close());
+// A click on the dimmed area outside the popup lands on the dialog itself.
+details.addEventListener("click", (event: MouseEvent) => {
+    if (event.target === details) {
+        details.close();
     }
 });

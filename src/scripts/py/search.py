@@ -219,6 +219,7 @@ def search_drugs(query: str, drugs: list[Drug]) -> list[dict[str, object]]:
         {
             "name": drugs[index].name,
             "nativized": drugs[index].nativized,
+            "query_nativized": target.nativized,
             "score": round(float(probabilities[index]) * 100, 2),
             "look_alike": float(look_alike[index]),
             "sound_alike": float(sound_alike[index]),

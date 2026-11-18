@@ -12,6 +12,8 @@ from search import prepare_drugs, search_drugs
 
 ROOT_DIR = Path(__file__).parents[3]
 DRUG_CSV = Path(__file__).parent / "data" / "ph_GenBrn.csv"
+# Whether each name is a generic or brand name in the PH FDA registry it came from.
+NAME_TYPES_CSV = Path(__file__).parent / "data" / "ph_name_types.csv"
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -21,7 +23,15 @@ def load_drug_names() -> list[str]:
         return [row["Drug Names"] for row in csv.DictReader(csv_file)]
 
 
+def load_name_types() -> dict[str, str]:
+    if not NAME_TYPES_CSV.exists():
+        return {}
+    with NAME_TYPES_CSV.open(newline="", encoding="utf-8") as csv_file:
+        return {row["name"]: row["type"] for row in csv.DictReader(csv_file)}
+
+
 prepared_drugs = prepare_drugs(load_drug_names())
+name_types = load_name_types()
 if not prepared_drugs:
     raise RuntimeError(f"{DRUG_CSV.name} has no usable drug names.")
 print(f"Loaded {len(prepared_drugs)} drug transcriptions from {DRUG_CSV.name}.")
@@ -48,9 +58,13 @@ def search(request: SearchRequest):
         raise HTTPException(status_code=422, detail="Enter a drug name.")
 
     try:
-        return search_drugs(query, prepared_drugs)
+        results = search_drugs(query, prepared_drugs)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+    for result in results:
+        result["name_type"] = name_types.get(result["name"])
+    return results
 
 
 # Serve the frontend from the same server so one command runs everything.
