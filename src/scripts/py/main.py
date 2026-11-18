@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 import csv
 import os
 
@@ -8,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from search import prepare_drugs, search_drugs
+from search import Drug, prepare_drugs, search_drugs
 
 ROOT_DIR = Path(__file__).parents[3]
 DRUG_CSV = Path(__file__).parent / "data" / "ph_GenBrn.csv"
@@ -49,6 +50,19 @@ app.add_middleware(
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
+    # Which kinds of names to search. Leaving it out searches every name.
+    name_types: list[Literal["Generic", "Brand"]] | None = None
+
+
+def drugs_of_types(types: set[str]) -> list[Drug]:
+    """Drugs whose name is one of `types`. "Generic and brand" names count as both.
+
+    Names with no known type are only searched when every type is chosen.
+    """
+    if {"Generic", "Brand"} <= types:
+        return prepared_drugs
+    wanted = types | {"Generic and brand"}
+    return [drug for drug in prepared_drugs if name_types.get(drug.name) in wanted]
 
 
 @app.post("/api/search")
@@ -57,8 +71,12 @@ def search(request: SearchRequest):
     if not query:
         raise HTTPException(status_code=422, detail="Enter a drug name.")
 
+    types = set(request.name_types) if request.name_types is not None else {"Generic", "Brand"}
+    if not types:
+        raise HTTPException(status_code=422, detail="Choose at least one drug name type.")
+
     try:
-        results = search_drugs(query, prepared_drugs)
+        results = search_drugs(query, drugs_of_types(types))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

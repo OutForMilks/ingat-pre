@@ -52,6 +52,7 @@ const spinner = getElement<HTMLSpanElement>("#loading-spinner");
 const rows = getElement<HTMLDivElement>("#rows");
 const empty = getElement<HTMLDivElement>("#empty");
 const arrangeOptions = getElement<HTMLFieldSetElement>("#arrange");
+const nameTypeOptions = getElement<HTMLFieldSetElement>("#name-types");
 
 const details = getElement<HTMLDialogElement>("#details");
 const detailsTitle = getElement<HTMLHeadingElement>("#details-title");
@@ -85,11 +86,11 @@ async function apiBase(): Promise<string> {
     }
 }
 
-async function runSearch(query: string): Promise<SearchResult[]> {
+async function runSearch(query: string, nameTypes: string[]): Promise<SearchResult[]> {
     const response = await fetch(`${await apiBase()}/api/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, name_types: nameTypes }),
     });
     if (!response.ok) {
         const body = (await response.json().catch(() => null)) as { detail?: unknown } | null;
@@ -242,6 +243,18 @@ function openDetails(result: SearchResult): void {
     details.showModal();
 }
 
+// Display names for the API's source ids.
+const SOURCE_LABELS: Record<string, string> = {
+    ph_GenBrn: "Philippine FDA",
+};
+
+function selectedNameTypes(): string[] {
+    return Array.from(
+        nameTypeOptions.querySelectorAll<HTMLInputElement>("input:checked"),
+        (option) => option.value,
+    );
+}
+
 function arrangedResults(): SearchResult[] {
     const arrangement = arrangeOptions.querySelector<HTMLInputElement>(":checked")?.value;
     const measure = (result: SearchResult): number => {
@@ -279,7 +292,7 @@ function renderResults(): void {
             lasa.append(element("span", "cell-label", "LASA probability"), scoreBadge(result.score));
 
             const source = element("div", "source");
-            source.append(element("span", "cell-label", "Source/s"), result.source);
+            source.append(element("span", "cell-label", "Source/s"), SOURCE_LABELS[result.source] ?? result.source);
 
             const open = element("button", "details-button", "Details");
             open.type = "button";
@@ -313,6 +326,14 @@ async function search(): Promise<void> {
         return;
     }
 
+    const nameTypes = selectedNameTypes();
+    if (!nameTypes.length) {
+        empty.textContent = "Choose Generic Name, Brand Name, or both.";
+        empty.hidden = false;
+        showResults([]);
+        return;
+    }
+
     button.disabled = true;
     buttonLabel.textContent = "Searching";
     spinner.hidden = false;
@@ -321,7 +342,7 @@ async function search(): Promise<void> {
     showResults([]);
 
     try {
-        const results = await runSearch(query);
+        const results = await runSearch(query, nameTypes);
         currentQuery = query;
         showResults(results);
 
@@ -339,6 +360,12 @@ async function search(): Promise<void> {
 }
 
 arrangeOptions.addEventListener("change", renderResults);
+// The backend picks the top matches among the chosen kinds of names, so search again.
+nameTypeOptions.addEventListener("change", () => {
+    if (input.value.trim()) {
+        void search();
+    }
+});
 button.addEventListener("click", search);
 input.addEventListener("keydown", (event: KeyboardEvent) => {
     if (event.key === "Enter") {

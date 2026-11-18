@@ -25,8 +25,10 @@ The drug list's transcriptions are cached in `data/classifier_cache.csv`, so onl
 POST /api/search
 Content-Type: application/json
 
-{"query": "Biogesic"}
+{"query": "Biogesic", "name_types": ["Generic", "Brand"]}
 ```
+
+`name_types` is optional. Leave it out, or list both, to search every drug name. With one type, only names of that type are searched (names that are both generic and brand count for either), and the roughly 125 names with no known type are skipped.
 
 The API returns a list of drugs. Each one has `name`, `name_type` (`Generic`, `Brand`, `Generic and brand`, or `null` when unknown), `nativized`, `query_nativized` (the query's own Filipino spelling), `score` (LASA probability, %), `look_alike`, `sound_alike`, `source`, and the per-algorithm scores in `look_alike_scores`, `sound_alike_scores` and `edit_counts`.
 

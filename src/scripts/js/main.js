@@ -29,6 +29,7 @@ const spinner = getElement("#loading-spinner");
 const rows = getElement("#rows");
 const empty = getElement("#empty");
 const arrangeOptions = getElement("#arrange");
+const nameTypeOptions = getElement("#name-types");
 const details = getElement("#details");
 const detailsTitle = getElement("#details-title");
 const detailsClose = getElement("#details-close");
@@ -59,11 +60,11 @@ async function apiBase() {
         throw new Error("Couldn't find the search server. Try again in a minute.");
     }
 }
-async function runSearch(query) {
+async function runSearch(query, nameTypes) {
     const response = await fetch(`${await apiBase()}/api/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, name_types: nameTypes }),
     });
     if (!response.ok) {
         const body = (await response.json().catch(() => null));
@@ -178,6 +179,13 @@ function openDetails(result) {
     fillDetailScores();
     details.showModal();
 }
+// Display names for the API's source ids.
+const SOURCE_LABELS = {
+    ph_GenBrn: "Philippine FDA",
+};
+function selectedNameTypes() {
+    return Array.from(nameTypeOptions.querySelectorAll("input:checked"), (option) => option.value);
+}
 function arrangedResults() {
     const arrangement = arrangeOptions.querySelector(":checked")?.value;
     const measure = (result) => {
@@ -209,7 +217,7 @@ function renderResults() {
         const lasa = element("div");
         lasa.append(element("span", "cell-label", "LASA probability"), scoreBadge(result.score));
         const source = element("div", "source");
-        source.append(element("span", "cell-label", "Source/s"), result.source);
+        source.append(element("span", "cell-label", "Source/s"), SOURCE_LABELS[result.source] ?? result.source);
         const open = element("button", "details-button", "Details");
         open.type = "button";
         open.setAttribute("aria-label", `Details for ${result.name}`);
@@ -230,6 +238,14 @@ async function search() {
         showResults([]);
         return;
     }
+    const nameTypes = selectedNameTypes();
+    if (!nameTypes.length) {
+        empty.textContent = "Choose Generic Name, Brand Name, or both.";
+        empty.hidden = false;
+        showResults([]);
+        return;
+    }
+
     button.disabled = true;
     buttonLabel.textContent = "Searching";
     spinner.hidden = false;
@@ -237,7 +253,7 @@ async function search() {
     empty.hidden = false;
     showResults([]);
     try {
-        const results = await runSearch(query);
+        const results = await runSearch(query, nameTypes);
         currentQuery = query;
         showResults(results);
         empty.textContent = results.length ? "" : "No matching drugs found.";
@@ -255,6 +271,12 @@ async function search() {
     }
 }
 arrangeOptions.addEventListener("change", renderResults);
+// The backend picks the top matches among the chosen kinds of names, so search again.
+nameTypeOptions.addEventListener("change", () => {
+    if (input.value.trim()) {
+        void search();
+    }
+});
 button.addEventListener("click", search);
 input.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
