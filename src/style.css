@@ -531,3 +531,155 @@ dialog::backdrop {
 .divided[hidden] {
     display: none;
 }
+
+/* Print report button: secondary, next to Search. */
+.secondary-button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.secondary-button:hover {
+    background: rgba(184,187,38,.14);
+    border-color: var(--accent);
+}
+
+.secondary-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+    background: var(--panel);
+    border-color: var(--border);
+}
+
+/* Printed report. Built by buildReport() in main.ts and shown only on paper.
+   A plain black-and-white document, so colors are fixed instead of theme variables. */
+#report {
+    display: none;
+}
+
+@page {
+    margin: 20mm 18mm;
+}
+
+@media print {
+    body.printing-report {
+        background: #fff;
+        color: #000;
+    }
+
+    body.printing-report > :not(#report) {
+        display: none !important;
+    }
+
+    body.printing-report #report {
+        display: block;
+    }
+}
+
+#report {
+    color: #000;
+    font-family: "Times New Roman", Times, serif;
+    font-size: 11pt;
+    line-height: 1.4;
+}
+
+#report p {
+    margin: 0 0 10pt;
+}
+
+.report-head {
+    text-align: center;
+    margin-bottom: 16pt;
+}
+
+.report-head p {
+    margin: 0;
+    font-size: 12pt;
+    font-weight: 700;
+}
+
+.report-head h1 {
+    margin: 2pt 0 0;
+    font-size: 14pt;
+    font-weight: 700;
+}
+
+.report-meta {
+    margin: 0 0 12pt;
+}
+
+.report-meta div {
+    display: flex;
+    gap: 6pt;
+}
+
+.report-meta dt {
+    flex: none;
+    width: 11em;
+    font-weight: 700;
+}
+
+.report-meta dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 10pt;
+    /* Set outright: without a doctype the page is in quirks mode, where tables do not inherit color or font. */
+    color: #000;
+    font-family: inherit;
+    font-size: 10pt;
+}
+
+.report-table th,
+.report-table td {
+    border: 0.75pt solid #000;
+    padding: 4pt 6pt;
+    text-align: left;
+    vertical-align: top;
+}
+
+.report-table th {
+    font-weight: 700;
+    /* Break only at the line break in the label, never at a hyphen. */
+    white-space: pre;
+    vertical-align: bottom;
+}
+
+.report-table tr {
+    break-inside: avoid;
+}
+
+.report-table .num {
+    text-align: right;
+}
+
+.report-table td.num {
+    white-space: nowrap;
+}
+
+#report .report-note {
+    font-size: 10pt;
+}
+
+.report-signatures {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40pt;
+    margin-top: 32pt;
+    break-inside: avoid;
+}
+
+#report .report-signatures p {
+    margin: 0;
+}
+
+.report-line {
+    height: 28pt;
+    border-bottom: 0.75pt solid #000;
+    margin-bottom: 2pt;
+}

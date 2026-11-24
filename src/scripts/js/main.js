@@ -40,8 +40,11 @@ const detailsLook = getElement("#details-look");
 const detailsSound = getElement("#details-sound");
 const detailsEdits = getElement("#details-edits");
 const detailsEditsSection = getElement("#details-edits-section");
+const printButton = getElement("#print");
+const report = getElement("#report");
 let currentResults = [];
 let currentQuery = "";
+let currentNameTypes = [];
 let openResult = null;
 let openPart = "full";
 // On GitHub Pages the API is on the home server, behind a quick tunnel whose URL
@@ -183,6 +186,9 @@ function openDetails(result) {
 const SOURCE_LABELS = {
     ph_GenBrn: "Philippine FDA",
 };
+function sourceLabel(source) {
+    return SOURCE_LABELS[source] ?? source;
+}
 function selectedNameTypes() {
     return Array.from(nameTypeOptions.querySelectorAll("input:checked"), (option) => option.value);
 }
@@ -217,7 +223,7 @@ function renderResults() {
         const lasa = element("div");
         lasa.append(element("span", "cell-label", "LASA probability"), scoreBadge(result.score));
         const source = element("div", "source");
-        source.append(element("span", "cell-label", "Source/s"), SOURCE_LABELS[result.source] ?? result.source);
+        source.append(element("span", "cell-label", "Source/s"), sourceLabel(result.source));
         const open = element("button", "details-button", "Details");
         open.type = "button";
         open.setAttribute("aria-label", `Details for ${result.name}`);
@@ -228,8 +234,120 @@ function renderResults() {
 }
 function showResults(results) {
     currentResults = results;
+    printButton.disabled = results.length === 0;
     renderResults();
 }
+// Printed report: a plain black-and-white document. Scores in the yellow or red
+// range on screen are classified LASA; the rest are Not LASA.
+function lasaLabel(score) {
+    return riskLevel(score) === "low" ? "Not LASA" : "LASA";
+}
+
+function reportField(label, value) {
+    const field = element("div");
+    field.append(element("dt", undefined, `${label}:`), element("dd", undefined, value));
+    return field;
+}
+
+function reportRow(result, position) {
+    const row = element("tr");
+    row.append(
+        element("td", "num", String(position + 1)),
+        element("td", undefined, result.name),
+        element("td", undefined, result.name_type ?? "Unknown"),
+        element("td", "num", `${result.look_alike.toFixed(1)}%`),
+        element("td", "num", `${result.sound_alike.toFixed(1)}%`),
+        element("td", "num", `${result.score}%`),
+        element("td", undefined, lasaLabel(result.score)),
+        element("td", undefined, sourceLabel(result.source)),
+    );
+    return row;
+}
+
+function buildReport() {
+    const results = arrangedResults();
+    const sources = Array.from(new Set(results.map((result) => sourceLabel(result.source))));
+    const generated = new Date().toLocaleString("en-PH", { dateStyle: "long", timeStyle: "short" });
+
+    const head = element("div", "report-head");
+    head.append(
+        element("p", undefined, "IngatRX"),
+        element("h1", undefined, "Look-Alike Sound-Alike (LASA) Screening Report"),
+    );
+
+    const meta = element("dl", "report-meta");
+    meta.append(
+        reportField("Proposed drug name", currentQuery),
+        reportField("Date generated", generated),
+        reportField("Name types compared", currentNameTypes.join(" and ")),
+        reportField("Data source/s", sources.join(", ")),
+    );
+
+    const headRow = element("tr");
+    // Long headers break onto two lines (white-space: pre) so the numeric columns stay narrow.
+    const columns = [
+        ["No.", "num"],
+        ["Drug name"],
+        ["Name type"],
+        ["Look-alike\nsimilarity", "num"],
+        ["Sound-alike\nsimilarity", "num"],
+        ["LASA\nprobability", "num"],
+        ["Classification"],
+        ["Source/s"],
+    ];
+    headRow.append(...columns.map(([label, className]) => element("th", className, label)));
+    const thead = element("thead");
+    thead.append(headRow);
+    const tbody = element("tbody");
+    tbody.append(...results.map((result, position) => reportRow(result, position)));
+    const table = element("table", "report-table");
+    table.append(thead, tbody);
+
+    const note = element("p", "report-note");
+    note.append(
+        "Note: LASA probability is the model's estimate of how likely the proposed name is to be " +
+            "confused with the listed drug name. It is based on how similar the two names look in writing " +
+            "and how similar they sound when read aloud in Filipino. Names at " +
+            `${POSSIBLE_LASA_PERCENT}% or higher are classified as LASA, and names below ` +
+            `${POSSIBLE_LASA_PERCENT}% as Not LASA. These results are `,
+        element("b", undefined, "for screening only"),
+        " and do not replace review by a qualified expert.",
+    );
+
+    const signatures = element("div", "report-signatures");
+    signatures.append(
+        ...["Prepared by", "Reviewed by"].map((role) => {
+            const block = element("div");
+            block.append(
+                element("p", undefined, `${role}:`),
+                element("div", "report-line"),
+                element("p", undefined, "Signature over printed name"),
+                element("div", "report-line"),
+                element("p", undefined, "Date"),
+            );
+            return block;
+        }),
+    );
+
+    report.replaceChildren(head, meta, table, note, signatures);
+}
+
+// Build the report for the print button and for Ctrl+P. With no results, the page prints as is.
+const pageTitle = document.title;
+window.addEventListener("beforeprint", () => {
+    if (!currentResults.length) {
+        return;
+    }
+    buildReport();
+    document.body.classList.add("printing-report");
+    // Browsers name a saved PDF after the page title.
+    document.title = `IngatRX LASA report - ${currentQuery}`;
+});
+window.addEventListener("afterprint", () => {
+    document.body.classList.remove("printing-report");
+    document.title = pageTitle;
+});
+printButton.addEventListener("click", () => window.print());
 async function search() {
     const query = input.value.trim();
     if (!query) {
@@ -255,6 +373,7 @@ async function search() {
     try {
         const results = await runSearch(query, nameTypes);
         currentQuery = query;
+        currentNameTypes = nameTypes;
         showResults(results);
         empty.textContent = results.length ? "" : "No matching drugs found.";
         empty.hidden = results.length > 0;

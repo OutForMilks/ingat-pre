@@ -29,6 +29,7 @@
                     <span id="go-label">Search</span>
                     <span id="loading-spinner" class="spinner" aria-hidden="true" hidden></span>
                 </button>
+                <button id="print" type="button" class="secondary-button" disabled>Print report</button>
             </div>
             <div class="results">
                 <div class="result-head" aria-hidden="true">
@@ -118,5 +119,8 @@
             </div>
         </div>
     </dialog>
+
+    <!-- Filled in just before printing; only shown on paper. -->
+    <section id="report"></section>
     <script type="module" src="./src/scripts/js/main.js"></script>
 </body>
